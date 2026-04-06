@@ -342,7 +342,7 @@ pushParticlesApart(numIters: number): void {
 >
 > **v2.1 fix A5 — early-exit optimization:** The original code has `if (d2 > minDist2 || d2 === 0.0) continue;` which avoids `Math.sqrt` for distant pairs. Since the type-aware version uses multiple distance thresholds, we pre-compute `maxEffectiveDist2` as the largest possible interaction distance across all type pairs and use it as a single pre-sqrt guard. This preserves the original code's performance characteristics while supporting the per-type distance logic.
 >
-> **v2.1 fix A6 — spatial hash ceiling for `attractRadius`:** The spatial hash cell size is `2.2 × particleRadius`, and the neighbor search checks a 3×3 cell neighborhood. This limits the maximum detectable pair distance to approximately `3 × 2.2 × particleRadius = 6.6 × particleRadius` in an axis-aligned direction (less diagonally). Since `attractRadiusAbs = attractRadius × 2 × particleRadius`, the ceiling is `attractRadius ≤ 2.2` (i.e., `attractRadiusAbs ≤ 4.4 × particleRadius`). Values above this cause attraction pairs at the edge of the band to be silently missed. The parameter table has been updated with this ceiling.
+> **v2.1 fix A6 — spatial hash ceiling for `attractRadius`:** The spatial hash cell size is `2.2 × particleRadius`, and the neighbor search checks a 3×3 cell neighborhood (±1 cell in each axis). The maximum reliable pair distance is `2 × cellSize = 2 × 2.2 × particleRadius = 4.4 × particleRadius` — beyond this, a pair may span non-adjacent cells and be missed. Since `attractRadiusAbs = attractRadius × 2 × particleRadius`, the hard ceiling is `attractRadius ≤ 2.2` (i.e., `attractRadiusAbs ≤ 4.4 × particleRadius`). Values above this cause attraction pairs at the edge of the band to be silently missed. The parameter table recommends staying at `≤ 2.0` for safety margin.
 
 ---
 
@@ -685,7 +685,7 @@ export { setupFluidScene, DEFAULT_SCENE_CONFIG, type SceneConfig } from './Fluid
 
 > **Stability guidance:** Setting `crossTypeMinDistScale` above `1.6` without reducing `repulsionStrength` or `maxRepulsionDelta` can cause instability. For stronger immiscibility, prefer increasing `numIters` in `pushParticlesApart` gradually (e.g. `4 → 6 → 8`) over raising the repulsion radius.
 >
-> **v2.1 — `attractRadius` ceiling (fix A6):** The spatial hash cell size is `2.2 × particleRadius`, and the 3×3 cell neighborhood search covers a maximum axis-aligned distance of ~`6.6 × particleRadius`. Since `attractRadiusAbs = attractRadius × 2 × particleRadius`, values of `attractRadius > 2.2` will cause some attraction pairs to fall outside the spatial hash search range and be silently missed. Keep `attractRadius ≤ 2.0` for reliable behavior. If wider attraction is needed, increase `pInvSpacing` (i.e., reduce the spatial hash cell size) and extend the neighborhood search to ±2 cells.
+> **v2.1 — `attractRadius` ceiling (fix A6):** The spatial hash cell size is `2.2 × particleRadius`, and the ±1-cell neighborhood search covers a maximum reliable distance of `2 × 2.2 × particleRadius = 4.4 × particleRadius` (beyond this, a pair may span non-adjacent cells and be missed). Since `attractRadiusAbs = attractRadius × 2 × particleRadius`, the hard ceiling is `attractRadius ≤ 2.2`. Keep `attractRadius ≤ 2.0` for a safety margin. If wider attraction is needed, increase `pInvSpacing` (i.e., reduce the spatial hash cell size) and extend the neighborhood search to ±2 cells.
 
 ---
 
