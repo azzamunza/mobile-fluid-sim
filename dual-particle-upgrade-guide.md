@@ -1,8 +1,8 @@
-# Dual-Particle Upgrade Guide — Version 2
+# Dual-Particle Upgrade Guide — Version 2.1
 
 > **Source:** [Copilot deep research task — azzamunza/mobile-fluid-sim](https://github.com/azzamunza/mobile-fluid-sim/tasks/49e89323-8190-4e44-8338-95921efc4782)
 >
-> **Revision:** v2 — addresses technical issues identified in the v1 review (see _Changes from v1_ section).
+> **Revision:** v2.1 — addresses additional technical issues identified in the v2 code-level review (see _Additional Technical Issues Addressed_ section).
 
 ---
 
@@ -53,15 +53,32 @@ The following issues found in the v1 review are addressed in this revision:
 
 ---
 
+## Additional Technical Issues Addressed (v2 → v2.1)
+
+The following issues were found during a code-level review of the v2 guide against the actual simulation source:
+
+| # | Issue | Impact | Fix |
+|---|---|---|---|
+| A1 | `setFluidColor()` iterates over **all** `maxParticles` and resets colors to water blue — called in `onMount` and `$effect`, immediately overwriting type-1 particle colors | **Critical** — secondary particles flash to water color on every reactive update | Make `setFluidColor` type-aware: skip particles where `particleType[i] === 1`. Add symmetric `setSecondaryColor` method (Step 5b) |
+| A2 | Svelte `$effect` for `fluidColor` calls `setFluidColor` — no corresponding `$effect` for `secondaryColor` | **Critical** — no reactive live-update path for secondary color | Add `setSecondaryColor` setter + `$effect` watcher in Step 7 |
+| A3 | `DualFluidConfig` type not exported from barrel `index.ts` | **Build error** — Svelte component cannot import the type | Add export to `index.ts` (File Map update) |
+| A4 | `DualFluidConfig` not imported in `FluidScene.ts` | **Build error** — `setupFluidScene` signature references unknown type | Add import statement in Step 6 |
+| A5 | `pushParticlesApart` removes the early `d2 > minDist2` exit — every neighbor pair now hits `Math.sqrt(d2)` even when clearly out of range | **Performance** — ~2× more sqrt calls in the hot inner loop | Add pre-sqrt `d2 > maxEffectiveDist2` guard using the largest possible effective distance (Step 4) |
+| A6 | Spatial hash cell size (`2.2 × particleRadius`) limits the maximum detectable neighbor distance to ~`4.4 × particleRadius`; `attractRadius × baseMinDist` can exceed this | **Silent bug** — attraction pairs at the edge of the band silently missed | Document ceiling; add warning in parameter table (Step 4 + Parameter Ranges) |
+| A7 | `particleRestDensity` is computed once from ALL particles — secondary particles in sparse surface regions lower the average, weakening drift compensation in the pressure solver | **Accuracy** — slight expansion of the water bulk; guide only noted the foam impact, not the pressure solver impact | Document the issue and mitigation strategy (Step 5 note) |
+
+---
+
 ## File Map
 
 ```
 src/lib/fluid/
-  FlipFluid.ts       ← Primary changes (particle type array, forces, buoyancy)
+  FlipFluid.ts       ← Primary changes (particle type array, forces, buoyancy, type-aware setters)
   FluidScene.ts      ← Secondary particle spawning
   FluidRenderer.ts   ← No structural changes needed (color is per-particle already)
+  index.ts           ← Export DualFluidConfig type (v2.1 fix A3)
 src/lib/
-  FluidSimulation.svelte  ← Expose new props for secondary fluid
+  FluidSimulation.svelte  ← Expose new props for secondary fluid; type-aware $effect handlers
 ```
 
 ---
@@ -221,6 +238,12 @@ pushParticlesApart(numIters: number): void {
     const baseMinDist  = 2.0 * this.particleRadius;
     const attractRadiusAbs = this.attractRadius * baseMinDist;
 
+    // v2.1 fix A5: pre-compute the largest effective distance across all type pairs
+    // so we can skip pairs that are clearly out of range BEFORE the expensive sqrt.
+    // For 0–0: baseMinDist; for 1–1 attraction band: attractRadiusAbs; for 0–1: crossTypeMinDistScale * baseMinDist
+    const maxEffectiveDist = Math.max(baseMinDist, attractRadiusAbs, this.crossTypeMinDistScale * baseMinDist);
+    const maxEffectiveDist2 = maxEffectiveDist * maxEffectiveDist;
+
     // ... spatial hash build (unchanged) ...
 
     for (let iter = 0; iter < numIters; iter++) {
@@ -241,7 +264,8 @@ pushParticlesApart(numIters: number): void {
                 const dx = qx - px;
                 const dy = qy - py;
                 const d2 = dx * dx + dy * dy;
-                if (d2 === 0.0) continue;
+                // v2.1 fix A5: early exit before sqrt — skip pairs beyond any possible interaction range
+                if (d2 > maxEffectiveDist2 || d2 === 0.0) continue;
                 const d = Math.sqrt(d2);
 
                 if (typeI === 1 && typeJ === 1) {
@@ -315,6 +339,10 @@ pushParticlesApart(numIters: number): void {
 > **Why explicit attraction matters:** Reducing the exclusion zone alone only allows type-1 particles to be close — it does not actively pull them together. The attraction band applies a small inward impulse whenever a pair is within `attractRadius * baseMinDist` but outside the exclusion zone, producing genuine clustering behavior. The impulse is capped at `maxAttractionDelta` per step to avoid instability.
 >
 > **Why cap cross-type repulsion:** A large `crossTypeMinDistScale` (e.g. `1.6`) combined with multiple solver iterations causes repeated over-corrections that can launch particles at high velocity (jitter/explosions). Keeping `crossTypeMinDistScale ≤ 1.4` and applying `repulsionStrength < 1` with a `maxRepulsionDelta` cap keeps each step's correction small and stable. For stronger separation, increase `numIters` rather than `crossTypeMinDistScale`.
+>
+> **v2.1 fix A5 — early-exit optimization:** The original code has `if (d2 > minDist2 || d2 === 0.0) continue;` which avoids `Math.sqrt` for distant pairs. Since the type-aware version uses multiple distance thresholds, we pre-compute `maxEffectiveDist2` as the largest possible interaction distance across all type pairs and use it as a single pre-sqrt guard. This preserves the original code's performance characteristics while supporting the per-type distance logic.
+>
+> **v2.1 fix A6 — spatial hash ceiling for `attractRadius`:** The spatial hash cell size is `2.2 × particleRadius`, and the neighbor search checks a 3×3 cell neighborhood. This limits the maximum detectable pair distance to approximately `3 × 2.2 × particleRadius = 6.6 × particleRadius` in an axis-aligned direction (less diagonally). Since `attractRadiusAbs = attractRadius × 2 × particleRadius`, the ceiling is `attractRadius ≤ 2.2` (i.e., `attractRadiusAbs ≤ 4.4 × particleRadius`). Values above this cause attraction pairs at the edge of the band to be silently missed. The parameter table has been updated with this ceiling.
 
 ---
 
@@ -388,6 +416,51 @@ updateParticleColors(dt: number): void {
 ```
 
 > **Future extension — per-type density:** To support accurate foam for both types, accumulate `particleDensityByType[type][cellNr]` in a separate pass during `transferVelocitiesToGrid`, using the same scatter loop as `particleDensity`. Then use `particleDensityByType[1][cellNr]` for the type-1 foam test instead of the shared field. This is out of scope for this upgrade but straightforward once the particle-type array exists.
+>
+> **v2.1 note A7 — `particleRestDensity` and drift compensation:** The shared `particleDensity` field sums contributions from all particle types. `particleRestDensity` is calculated once (on the first simulation step) as the average density across all fluid cells. When secondary particles are spawned in a sparse region (e.g., on the surface), they lower the average rest density. This affects not only the foam test (addressed above) but also the **drift compensation** in `solveIncompressibility`, which uses `particleRestDensity` to detect compression (`compression = particleDensity[cell] - particleRestDensity`). A lower rest density weakens the compression correction, potentially causing slight expansion of the water bulk. Mitigation strategies:
+> - **Option A (simple):** Compute `particleRestDensity` from type-0 particles only during the initial calibration step. This requires filtering the density accumulation or computing rest density before spawning type-1 particles.
+> - **Option B (full):** Maintain per-type rest densities as part of the per-type density extension described above.
+
+---
+
+### Step 5b — Type-aware `setFluidColor` and new `setSecondaryColor` setter (v2.1 fix A1/A2)
+
+**File:** `src/lib/fluid/FlipFluid.ts`
+
+> **v2.1 fix A1:** The existing `setFluidColor()` method iterates over **all** `maxParticles` and resets every particle's color to the water base color. This is called both in `onMount` and in a Svelte `$effect` that fires whenever `fluidColor` changes. After the dual-particle upgrade, this would immediately overwrite the secondary particles' amber color with water blue.
+>
+> **v2.1 fix A2:** There is no corresponding setter or `$effect` for updating the secondary fluid color at runtime.
+
+**Replace the existing `setFluidColor` method** to skip type-1 particles:
+
+```ts
+setFluidColor(baseColor: { r: number; g: number; b: number }): void {
+    this.baseColor = { ...baseColor };
+    for (let i = 0; i < this.maxParticles; i++) {
+        // v2.1 fix A1: only update type-0 (water) particles
+        if (this.particleType[i] === 1) continue;
+        this.particleColor[3 * i]     = baseColor.r;
+        this.particleColor[3 * i + 1] = baseColor.g;
+        this.particleColor[3 * i + 2] = baseColor.b;
+    }
+}
+```
+
+**Add a new `setSecondaryColor` method** (alongside the existing setters):
+
+```ts
+setSecondaryColor(color: { r: number; g: number; b: number }): void {
+    this.secondaryBaseColor = { ...color };
+    for (let i = 0; i < this.maxParticles; i++) {
+        if (this.particleType[i] !== 1) continue;
+        this.particleColor[3 * i]     = color.r;
+        this.particleColor[3 * i + 1] = color.g;
+        this.particleColor[3 * i + 2] = color.b;
+    }
+}
+```
+
+> **Why this matters:** Without this fix, the Svelte component's `onMount` callback calls `fluid.setFluidColor(fluidColor)` immediately after `setupFluidScene` returns, and the `$effect(() => { fluid.setFluidColor(fluidColor); })` fires on every reactive update — both of which would overwrite the secondary particle colors set during scene setup. The type check ensures each setter only touches its own particle type.
 
 ---
 
@@ -398,6 +471,12 @@ updateParticleColors(dt: number): void {
 > **v2 changes:**
 > - `secStartY` is **clamped** to `[h + r, tankHeight − h − r]` to prevent the spawn region from overlapping boundaries or the water block regardless of dimension combinations.
 > - New parameters are passed as a `DualFluidConfig` object rather than positional args.
+>
+> **v2.1 fix A4:** Import `DualFluidConfig` from `FlipFluid.ts` at the top of this file:
+
+```ts
+import { FlipFluid, type DualFluidConfig } from './FlipFluid';
+```
 
 Extend `setupFluidScene` to accept secondary-particle configuration and spawn a configurable number of type-1 particles in a separate region (e.g., a small block on the surface):
 
@@ -505,9 +584,17 @@ export function setupFluidScene(
 **File:** `src/lib/FluidSimulation.svelte`
 
 > **v2 change:** Secondary parameters are grouped into a single `dualConfig` prop of type `DualFluidConfig`, avoiding a long list of individual props for the new parameters.
+>
+> **v2.1 fix A1/A2:** The existing `$effect` for `fluidColor` calls `fluid.setFluidColor(fluidColor)` which (after Step 5b) is now type-aware. Additionally, a new `$effect` for `secondaryColor` is added so that secondary particle color can be updated reactively at runtime. The `onMount` block must also call `setSecondaryColor` after setup.
+>
+> **v2.1 fix A3:** Import `DualFluidConfig` from `$lib/fluid` — this requires the barrel export update in `index.ts` (see File Map).
 
 ```svelte
 <script lang="ts">
+    import { onMount } from 'svelte';
+    import { setupFluidScene, FluidRenderer } from '$lib/fluid';
+    import type { FlipFluid, DualFluidConfig } from '$lib/fluid';  // v2.1 fix A3
+
     let {
         gravity = { x: 0, y: -9.81 },
         resolution = 70,
@@ -535,7 +622,7 @@ export function setupFluidScene(
         onclick?: () => void;
     } = $props();
 
-    // Pass new params to setupFluidScene:
+    // In onMount, pass new params to setupFluidScene:
     fluid = setupFluidScene(
         simWidth, simHeight, resolution,
         relWaterWidth, relWaterHeight,
@@ -543,7 +630,40 @@ export function setupFluidScene(
         secondaryColor, relSecondaryWidth, relSecondaryHeight,
         dualConfig
     );
+
+    // v2.1 fix A1: existing setFluidColor is now type-aware (Step 5b),
+    // so this call no longer overwrites secondary particle colors.
+    if (fluid) {
+        fluid.setFluidColor(fluidColor);
+        fluid.setFoamColor(foamColor);
+        fluid.setColorDiffusionCoeff(colorDiffusionCoeff);
+        fluid.setFoamReturnRate(foamReturnRate);
+        fluid.setSecondaryColor(secondaryColor);  // v2.1 fix A2
+    }
+
+    // --- Existing $effect watchers (unchanged but now safe due to Step 5b) ---
+
+    $effect(() => {
+        if (fluid) {
+            fluid.setFluidColor(fluidColor);  // now type-aware — skips type-1 particles
+        }
+    });
+
+    // v2.1 fix A2: reactive watcher for secondary color changes
+    $effect(() => {
+        if (fluid) {
+            fluid.setSecondaryColor(secondaryColor);
+        }
+    });
 </script>
+```
+
+**`index.ts` barrel export update (v2.1 fix A3):**
+
+```ts
+export { FlipFluid, FLUID_CELL, AIR_CELL, SOLID_CELL, type DualFluidConfig } from './FlipFluid';
+export { FluidRenderer, type RenderConfig } from './FluidRenderer';
+export { setupFluidScene, DEFAULT_SCENE_CONFIG, type SceneConfig } from './FluidScene';
 ```
 
 ---
@@ -555,7 +675,7 @@ export function setupFluidScene(
 | `buoyancyLiftType1` | 4.0 | 6.0 | >9.81 (net rise) |
 | `cohesionMinDistScale` | 0.8 | 0.7 | 0.5 |
 | `attractionStrength` | 0.2 | 0.4 | 0.8 |
-| `attractRadius` | 1.2 | 1.5 | 2.0 |
+| `attractRadius` | 1.2 | 1.5 | 2.0 (max ≤ 2.2 — see A6) |
 | `maxAttractionDelta` | 0.001 | 0.002 | 0.005 |
 | `repulsionStrength` | 0.3 | 0.5 | 0.8 |
 | `crossTypeMinDistScale` | 1.2 | 1.4 | 1.6 |
@@ -564,6 +684,8 @@ export function setupFluidScene(
 | `relSecondaryHeight` | 0.1 | 0.2 | 0.3 |
 
 > **Stability guidance:** Setting `crossTypeMinDistScale` above `1.6` without reducing `repulsionStrength` or `maxRepulsionDelta` can cause instability. For stronger immiscibility, prefer increasing `numIters` in `pushParticlesApart` gradually (e.g. `4 → 6 → 8`) over raising the repulsion radius.
+>
+> **v2.1 — `attractRadius` ceiling (fix A6):** The spatial hash cell size is `2.2 × particleRadius`, and the 3×3 cell neighborhood search covers a maximum axis-aligned distance of ~`6.6 × particleRadius`. Since `attractRadiusAbs = attractRadius × 2 × particleRadius`, values of `attractRadius > 2.2` will cause some attraction pairs to fall outside the spatial hash search range and be silently missed. Keep `attractRadius ≤ 2.0` for reliable behavior. If wider attraction is needed, increase `pInvSpacing` (i.e., reduce the spatial hash cell size) and extend the neighborhood search to ±2 cells.
 
 ---
 
@@ -632,7 +754,8 @@ No automated test infrastructure exists in this repository. The following manual
 
 | File | Change |
 |---|---|
-| `src/lib/fluid/FlipFluid.ts` | Add `particleType`, `DualFluidConfig`, buoyancy lift, `pushParticlesApart` with attraction + capped repulsion, `updateParticleColors` with per-type foam guard |
-| `src/lib/fluid/FluidScene.ts` | Add secondary-particle spawn block with clamped bounds; pass `DualFluidConfig` object |
-| `src/lib/FluidSimulation.svelte` | Expose `dualConfig` prop; forward to `setupFluidScene` |
+| `src/lib/fluid/FlipFluid.ts` | Add `particleType`, `DualFluidConfig`, buoyancy lift, `pushParticlesApart` with attraction + capped repulsion + early-exit optimization (A5), `updateParticleColors` with per-type foam guard, type-aware `setFluidColor` (A1), new `setSecondaryColor` (A2) |
+| `src/lib/fluid/FluidScene.ts` | Add `DualFluidConfig` import (A4); add secondary-particle spawn block with clamped bounds; pass `DualFluidConfig` object |
+| `src/lib/FluidSimulation.svelte` | Import `DualFluidConfig` type (A3); expose `dualConfig` + `secondaryColor` props; forward to `setupFluidScene`; add `setSecondaryColor` `$effect` (A2); existing `setFluidColor` effect now safe (A1) |
+| `src/lib/fluid/index.ts` | Export `DualFluidConfig` type from barrel (A3) |
 | `src/lib/fluid/FluidRenderer.ts` | **No changes required** — renderer already uses per-particle color |
