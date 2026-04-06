@@ -3,6 +3,39 @@ export const FLUID_CELL = 0;
 export const AIR_CELL = 1;
 export const SOLID_CELL = 2;
 
+export interface DualFluidConfig {
+    /** Explicit upward acceleration added to type-1 particles each step (m/s²).
+     *  Independent of global gravityY. Default: 6.0 (net lift when gravityY ≈ −9.81). */
+    buoyancyLiftType1?: number;
+
+    /** Separation distance multiplier for same-type (1–1) pairs.
+     *  Values > 1.0 widen the exclusion zone; values < 1.0 allow closer packing.
+     *  Default: 0.7 (allows closer packing → passive cohesion baseline). */
+    cohesionMinDistScale?: number;
+
+    /** Attraction strength for 1–1 pairs in the band [baseMinDist * cohesionMinDistScale, attractRadius].
+     *  Applied as a mild velocity impulse capped at maxAttractionDelta per step.
+     *  Default: 0.4 */
+    attractionStrength?: number;
+
+    /** Outer edge of the 1–1 attraction band, as a multiple of baseMinDist. Default: 1.5 */
+    attractRadius?: number;
+
+    /** Maximum position correction per particle per pair per iteration for attraction. Default: 0.002 */
+    maxAttractionDelta?: number;
+
+    /** Overlap-zone correction strength for cross-type (0–1) pairs. < 1.0 reduces jitter.
+     *  Default: 0.5 */
+    repulsionStrength?: number;
+
+    /** Effective min-distance multiplier for cross-type (0–1) pairs.
+     *  Keep ≤ 1.6 to avoid repeated over-correction. Default: 1.4 */
+    crossTypeMinDistScale?: number;
+
+    /** Maximum position correction per particle per pair per iteration for repulsion. Default: 0.005 */
+    maxRepulsionDelta?: number;
+}
+
 function clamp(x: number, min: number, max: number): number {
     if (x < min) return min;
     if (x > max) return max;
@@ -38,11 +71,28 @@ export class FlipFluid {
     particleRestDensity: number;
     numParticles: number;
 
+    // Particle type: 0 = water, 1 = secondary fluid
+    particleType: Int8Array;
+
     // Colors
     baseColor: { r: number; g: number; b: number };
     foamColor: { r: number; g: number; b: number };
     colorDiffusionCoeff: number;
     foamReturnRate: number; // per-second rate towards base color
+
+    // Per-type colors
+    secondaryBaseColor: { r: number; g: number; b: number };
+    secondaryFoamColor: { r: number; g: number; b: number };
+
+    // Dual-fluid config parameters
+    buoyancyLiftType1: number;
+    cohesionMinDistScale: number;
+    attractionStrength: number;
+    attractRadius: number;
+    maxAttractionDelta: number;
+    repulsionStrength: number;
+    crossTypeMinDistScale: number;
+    maxRepulsionDelta: number;
 
     // Particle grid
     particleRadius: number;
@@ -64,7 +114,8 @@ export class FlipFluid {
         baseColor?: { r: number; g: number; b: number },
         foamColor?: { r: number; g: number; b: number },
         colorDiffusionCoeff: number = 0.01,
-        foamReturnRate: number = 1.0
+        foamReturnRate: number = 1.0,
+        dualConfig: DualFluidConfig = {}
     ) {
         this.density = density;
         this.fNumX = Math.floor(width / spacing) + 1;
@@ -106,8 +157,26 @@ export class FlipFluid {
         }
 
         this.particleVel = new Float32Array(2 * this.maxParticles);
+        this.particleType = new Int8Array(this.maxParticles);
+        // default 0 (water) — no explicit fill needed because Int8Array zero-initializes
+
         this.particleDensity = new Float32Array(this.fNumCells);
         this.particleRestDensity = 0.0;
+
+        // Secondary particle colors (defaults to warm amber)
+        this.secondaryBaseColor = { r: 1.0, g: 0.7, b: 0.1 };
+        this.secondaryFoamColor = { r: 1.0, g: 0.95, b: 0.7 };
+
+        // Dual-fluid config
+        const cfg = dualConfig;
+        this.buoyancyLiftType1     = cfg.buoyancyLiftType1    ?? 6.0;
+        this.cohesionMinDistScale  = cfg.cohesionMinDistScale  ?? 0.7;
+        this.attractionStrength    = cfg.attractionStrength    ?? 0.4;
+        this.attractRadius         = cfg.attractRadius         ?? 1.5;
+        this.maxAttractionDelta    = cfg.maxAttractionDelta    ?? 0.002;
+        this.repulsionStrength     = cfg.repulsionStrength     ?? 0.5;
+        this.crossTypeMinDistScale = cfg.crossTypeMinDistScale ?? 1.4;
+        this.maxRepulsionDelta     = cfg.maxRepulsionDelta     ?? 0.005;
 
         // Initialize particle grid
         this.particleRadius = particleRadius;
@@ -125,22 +194,30 @@ export class FlipFluid {
 
     integrateParticles(dt: number, gravityX: number, gravityY: number, damping: number): void {
         for (let i = 0; i < this.numParticles; i++) {
-            // Apply gravity
-            this.particleVel[2 * i] += dt * gravityX;     // Apply X component of gravity
-            this.particleVel[2 * i + 1] += dt * gravityY; // Apply Y component of gravity
+            // Apply an explicit upward lift to secondary particles (type 1).
+            // buoyancyLiftType1 is a positive value that opposes gravityY (which is negative).
+            const liftY = this.particleType[i] === 1 ? this.buoyancyLiftType1 : 0.0;
 
-            // Apply damping to reduce velocity over time
-            this.particleVel[2 * i] *= damping;
+            this.particleVel[2 * i]     += dt * gravityX;
+            this.particleVel[2 * i + 1] += dt * (gravityY + liftY);
+
+            this.particleVel[2 * i]     *= damping;
             this.particleVel[2 * i + 1] *= damping;
 
-            // Update positions
-            this.particlePos[2 * i] += this.particleVel[2 * i] * dt;
+            this.particlePos[2 * i]     += this.particleVel[2 * i]     * dt;
             this.particlePos[2 * i + 1] += this.particleVel[2 * i + 1] * dt;
         }
     }
 
     pushParticlesApart(numIters: number): void {
         const colorDiffusionCoeff = this.colorDiffusionCoeff;
+        const baseMinDist = 2.0 * this.particleRadius;
+        const attractRadiusAbs = this.attractRadius * baseMinDist;
+
+        // v2.1 fix A5: pre-compute the largest effective distance across all type pairs
+        // so we can skip pairs that are clearly out of range BEFORE the expensive sqrt.
+        const maxEffectiveDist = Math.max(baseMinDist, attractRadiusAbs, this.crossTypeMinDistScale * baseMinDist);
+        const maxEffectiveDist2 = maxEffectiveDist * maxEffectiveDist;
 
         // Build spatial hash
         this.numCellParticles.fill(0);
@@ -170,13 +247,11 @@ export class FlipFluid {
             this.cellParticleIds[this.firstCellParticle[cellNr]] = i;
         }
 
-        const minDist = 2.0 * this.particleRadius;
-        const minDist2 = minDist * minDist;
-
         for (let iter = 0; iter < numIters; iter++) {
             for (let i = 0; i < this.numParticles; i++) {
                 const px = this.particlePos[2 * i];
                 const py = this.particlePos[2 * i + 1];
+                const typeI = this.particleType[i];
                 const pxi = Math.floor(px * this.pInvSpacing);
                 const pyi = Math.floor(py * this.pInvSpacing);
 
@@ -195,31 +270,75 @@ export class FlipFluid {
                             const id = this.cellParticleIds[j];
                             if (id === i) continue;
 
+                            const typeJ = this.particleType[id];
                             const qx = this.particlePos[2 * id];
                             const qy = this.particlePos[2 * id + 1];
                             const dx = qx - px;
                             const dy = qy - py;
                             const d2 = dx * dx + dy * dy;
-
-                            if (d2 > minDist2 || d2 === 0.0) continue;
-
+                            // v2.1 fix A5: early exit before sqrt
+                            if (d2 > maxEffectiveDist2 || d2 === 0.0) continue;
                             const d = Math.sqrt(d2);
-                            const s = 0.5 * (minDist - d) / d;
-                            const deltaX = dx * s;
-                            const deltaY = dy * s;
 
-                            this.particlePos[2 * i] -= deltaX;
-                            this.particlePos[2 * i + 1] -= deltaY;
-                            this.particlePos[2 * id] += deltaX;
-                            this.particlePos[2 * id + 1] += deltaY;
+                            if (typeI === 1 && typeJ === 1) {
+                                // ── Secondary–secondary ──────────────────────────────
+                                const effectiveMinDist = baseMinDist * this.cohesionMinDistScale;
 
-                            // Color mixing
-                            for (let k = 0; k < 3; k++) {
-                                const color0 = this.particleColor[3 * i + k];
-                                const color1 = this.particleColor[3 * id + k];
-                                const color = (color0 + color1) * 0.5;
-                                this.particleColor[3 * i + k] = color0 + (color - color0) * colorDiffusionCoeff;
-                                this.particleColor[3 * id + k] = color1 + (color - color1) * colorDiffusionCoeff;
+                                if (d < effectiveMinDist) {
+                                    // Overlap: push apart (normal separation)
+                                    const s = 0.5 * (effectiveMinDist - d) / d;
+                                    const cx = Math.min(Math.abs(dx * s), this.maxAttractionDelta) * Math.sign(dx * s);
+                                    const cy = Math.min(Math.abs(dy * s), this.maxAttractionDelta) * Math.sign(dy * s);
+                                    this.particlePos[2 * i]      -= cx;
+                                    this.particlePos[2 * i + 1]  -= cy;
+                                    this.particlePos[2 * id]     += cx;
+                                    this.particlePos[2 * id + 1] += cy;
+                                } else if (d <= attractRadiusAbs) {
+                                    // Attraction band: pull together with a mild impulse capped per step
+                                    const s = this.attractionStrength * (d - effectiveMinDist) /
+                                              (attractRadiusAbs - effectiveMinDist + 1e-9);
+                                    const rawAx = dx * s * 0.5 / d;
+                                    const rawAy = dy * s * 0.5 / d;
+                                    const ax = Math.min(Math.abs(rawAx), this.maxAttractionDelta) * Math.sign(rawAx);
+                                    const ay = Math.min(Math.abs(rawAy), this.maxAttractionDelta) * Math.sign(rawAy);
+                                    this.particlePos[2 * i]      += ax;
+                                    this.particlePos[2 * i + 1]  += ay;
+                                    this.particlePos[2 * id]     -= ax;
+                                    this.particlePos[2 * id + 1] -= ay;
+                                }
+
+                            } else if (typeI !== typeJ) {
+                                // ── Water–secondary (cross-type) ─────────────────────
+                                const effectiveMinDist = baseMinDist * this.crossTypeMinDistScale;
+                                if (d >= effectiveMinDist) continue;
+
+                                const raw = 0.5 * (effectiveMinDist - d) / d * this.repulsionStrength;
+                                const cx = Math.min(Math.abs(dx * raw), this.maxRepulsionDelta) * Math.sign(dx * raw);
+                                const cy = Math.min(Math.abs(dy * raw), this.maxRepulsionDelta) * Math.sign(dy * raw);
+                                this.particlePos[2 * i]      -= cx;
+                                this.particlePos[2 * i + 1]  -= cy;
+                                this.particlePos[2 * id]     += cx;
+                                this.particlePos[2 * id + 1] += cy;
+
+                            } else {
+                                // ── Water–water: normal separation ───────────────────
+                                if (d >= baseMinDist) continue;
+                                const s = 0.5 * (baseMinDist - d) / d;
+                                this.particlePos[2 * i]      -= dx * s;
+                                this.particlePos[2 * i + 1]  -= dy * s;
+                                this.particlePos[2 * id]     += dx * s;
+                                this.particlePos[2 * id + 1] += dy * s;
+                            }
+
+                            // Color mixing: only mix particles of the same type
+                            if (typeI === typeJ) {
+                                for (let k = 0; k < 3; k++) {
+                                    const color0 = this.particleColor[3 * i  + k];
+                                    const color1 = this.particleColor[3 * id + k];
+                                    const color  = (color0 + color1) * 0.5;
+                                    this.particleColor[3 * i  + k] = color0 + (color - color0) * colorDiffusionCoeff;
+                                    this.particleColor[3 * id + k] = color1 + (color - color1) * colorDiffusionCoeff;
+                                }
                             }
                         }
                     }
@@ -467,37 +586,43 @@ export class FlipFluid {
     }
 
     updateParticleColors(dt: number): void {
-        // Apply foam when in low-density regions; otherwise decay color back to base using time-based rate
         const h1 = this.fInvSpacing;
         const t = Math.max(0, Math.min(1, this.foamReturnRate * dt));
 
         for (let i = 0; i < this.numParticles; i++) {
-            const x = this.particlePos[2 * i];
-            const y = this.particlePos[2 * i + 1];
+            const isSecondary = this.particleType[i] === 1;
+            const base = isSecondary ? this.secondaryBaseColor : this.baseColor;
+            const foam = isSecondary ? this.secondaryFoamColor : this.foamColor;
+
+            const x  = this.particlePos[2 * i];
+            const y  = this.particlePos[2 * i + 1];
             const xi = clamp(Math.floor(x * h1), 1, this.fNumX - 1);
             const yi = clamp(Math.floor(y * h1), 1, this.fNumY - 1);
             const cellNr = xi * this.fNumY + yi;
 
+            // For type-1 particles, skip the foam test: the shared particleDensity
+            // reflects mixed-fluid density, so applying foam based on it would
+            // incorrectly whiten secondary particles in water-dense regions.
             let applyFoam = false;
-            const d0 = this.particleRestDensity;
-            if (d0 > 0.0) {
-                const relDensity = this.particleDensity[cellNr] / d0;
-                if (relDensity < 0.7) applyFoam = true;
+            if (!isSecondary) {
+                const d0 = this.particleRestDensity;
+                if (d0 > 0.0) {
+                    const relDensity = this.particleDensity[cellNr] / d0;
+                    if (relDensity < 0.7) applyFoam = true;
+                }
             }
 
             if (applyFoam) {
-                // Set to foam color immediately while in foam region
-                this.particleColor[3 * i] = this.foamColor.r;
-                this.particleColor[3 * i + 1] = this.foamColor.g;
-                this.particleColor[3 * i + 2] = this.foamColor.b;
+                this.particleColor[3 * i]     = foam.r;
+                this.particleColor[3 * i + 1] = foam.g;
+                this.particleColor[3 * i + 2] = foam.b;
             } else {
-                // Lerp back to base color at a controllable rate
                 const cr = this.particleColor[3 * i];
                 const cg = this.particleColor[3 * i + 1];
                 const cb = this.particleColor[3 * i + 2];
-                this.particleColor[3 * i] = cr + (this.baseColor.r - cr) * t;
-                this.particleColor[3 * i + 1] = cg + (this.baseColor.g - cg) * t;
-                this.particleColor[3 * i + 2] = cb + (this.baseColor.b - cb) * t;
+                this.particleColor[3 * i]     = cr + (base.r - cr) * t;
+                this.particleColor[3 * i + 1] = cg + (base.g - cg) * t;
+                this.particleColor[3 * i + 2] = cb + (base.b - cb) * t;
             }
         }
     }
@@ -572,9 +697,21 @@ export class FlipFluid {
     setFluidColor(baseColor: { r: number; g: number; b: number }): void {
         this.baseColor = { ...baseColor };
         for (let i = 0; i < this.maxParticles; i++) {
-            this.particleColor[3 * i] = baseColor.r;
+            // v2.1 fix A1: only update type-0 (water) particles
+            if (this.particleType[i] === 1) continue;
+            this.particleColor[3 * i]     = baseColor.r;
             this.particleColor[3 * i + 1] = baseColor.g;
             this.particleColor[3 * i + 2] = baseColor.b;
+        }
+    }
+
+    setSecondaryColor(color: { r: number; g: number; b: number }): void {
+        this.secondaryBaseColor = { ...color };
+        for (let i = 0; i < this.maxParticles; i++) {
+            if (this.particleType[i] !== 1) continue;
+            this.particleColor[3 * i]     = color.r;
+            this.particleColor[3 * i + 1] = color.g;
+            this.particleColor[3 * i + 2] = color.b;
         }
     }
 
