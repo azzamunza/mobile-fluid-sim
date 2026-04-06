@@ -15,7 +15,7 @@
 		secondaryColor = { r: 1.0, g: 0.7, b: 0.1 },
 		relSecondaryWidth = 0.2,
 		relSecondaryHeight = 0.2,
-		dualConfig = {} as DualFluidConfig,
+		dualConfig = {},
 		onclick
 	}: {
 		gravity?: { x: number; y: number };
