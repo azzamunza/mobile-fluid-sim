@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 
 	import { setupFluidScene, FluidRenderer } from '$lib/fluid';
-	import type { FlipFluid } from '$lib/fluid';
+	import type { FlipFluid, DualFluidConfig } from '$lib/fluid';
 
 	let {
 		gravity = { x: 0, y: -9.81 },
@@ -11,15 +11,23 @@
 		foamColor = { r: 0.75, g: 0.9, b: 1.0 },
 		colorDiffusionCoeff = 0.0008,
 		foamReturnRate = 0.5,
+		// --- secondary fluid props ---
+		secondaryColor = { r: 1.0, g: 0.7, b: 0.1 },
+		relSecondaryWidth = 0.2,
+		relSecondaryHeight = 0.2,
+		dualConfig = {},
 		onclick
 	}: {
 		gravity?: { x: number; y: number };
 		resolution?: number;
-		angle?: number;
 		fluidColor?: { r: number; g: number; b: number };
 		foamColor?: { r: number; g: number; b: number };
 		colorDiffusionCoeff?: number;
 		foamReturnRate?: number;
+		secondaryColor?: { r: number; g: number; b: number };
+		relSecondaryWidth?: number;
+		relSecondaryHeight?: number;
+		dualConfig?: DualFluidConfig;
 		onclick?: () => void;
 	} = $props();
 
@@ -111,7 +119,11 @@
 			fluidColor,
 			foamColor,
 			colorDiffusionCoeff,
-			foamReturnRate
+			foamReturnRate,
+			secondaryColor,
+			relSecondaryWidth,
+			relSecondaryHeight,
+			dualConfig
 		);
 		renderer = new FluidRenderer(canvas);
 
@@ -121,6 +133,7 @@
 			fluid.setFoamColor(foamColor);
 			fluid.setColorDiffusionCoeff(colorDiffusionCoeff);
 			fluid.setFoamReturnRate(foamReturnRate);
+			fluid.setSecondaryColor(secondaryColor);
 		}
 
 		// Handle window resize
@@ -151,6 +164,13 @@
 	$effect(() => {
 		if (fluid) {
 			fluid.setFoamColor(foamColor);
+		}
+	});
+
+	// Watch for secondary color changes
+	$effect(() => {
+		if (fluid) {
+			fluid.setSecondaryColor(secondaryColor);
 		}
 	});
 
