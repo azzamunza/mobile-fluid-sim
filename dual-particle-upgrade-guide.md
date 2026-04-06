@@ -262,8 +262,10 @@ pushParticlesApart(numIters: number): void {
                         // Attraction band: pull together with a mild impulse capped per step
                         const s = this.attractionStrength * (d - effectiveMinDist) /
                                   (attractRadiusAbs - effectiveMinDist + 1e-9);
-                        const ax = Math.min(dx * s * 0.5 / d, this.maxAttractionDelta);
-                        const ay = Math.min(dy * s * 0.5 / d, this.maxAttractionDelta);
+                        const rawAx = dx * s * 0.5 / d;
+                        const rawAy = dy * s * 0.5 / d;
+                        const ax = Math.min(Math.abs(rawAx), this.maxAttractionDelta) * Math.sign(rawAx);
+                        const ay = Math.min(Math.abs(rawAy), this.maxAttractionDelta) * Math.sign(rawAy);
                         this.particlePos[2 * i]      += ax;
                         this.particlePos[2 * i + 1]  += ay;
                         this.particlePos[2 * id]     -= ax;
@@ -455,6 +457,7 @@ export function setupFluidScene(
     // secStartY is clamped to a valid region inside the fluid boundary:
     //   lower bound: h + r        (above bottom wall + particle radius)
     //   upper bound: tankHeight - h - r - (secNumY - 1) * dy  (fits the block inside the top wall)
+    //                Math.max(0, secNumY - 1) guards against secNumY = 0 (no secondary particles)
     const secColor = secondaryColor ?? { r: 1.0, g: 0.7, b: 0.1 };
     const secStartX = (tankWidth - (secNumX - 1) * dx) / 2.0;
     const rawSecStartY = tankHeight - relSecondaryHeight * tankHeight - h;
@@ -549,7 +552,7 @@ export function setupFluidScene(
 
 | Parameter | Conservative | Suggested Start | Aggressive |
 |---|---|---|---|
-| `buoyancyLiftType1` | 4.0 | 6.0 | 9.81+ (net rise) |
+| `buoyancyLiftType1` | 4.0 | 6.0 | >9.81 (net rise) |
 | `cohesionMinDistScale` | 0.8 | 0.7 | 0.5 |
 | `attractionStrength` | 0.2 | 0.4 | 0.8 |
 | `attractRadius` | 1.2 | 1.5 | 2.0 |
